@@ -18,7 +18,9 @@
 
 文件撤销不等于 whole checkpoint：不覆盖 shell、未记录子代理、二进制补丁。Git reverse check/apply 不用 --index/--cached/--3way；用户 index 和无关文件严格保持。恢复后的文本走 Git 属性/autocrlf，不保证原始字节或换行完全一致。未知 change kind、缺失 diff、冲突、陈旧 token、越界/链接路径整批拒绝。
 
-runtime mutation 30 秒超时后使会话失效并终止 provider，用户重连 ACP 再显式 load；不会自动重放 mutation。Windows 终止 owned 进程树；POSIX 当前仅保证 launcher 终止，子树级保证未验证。历史回退 dispatch 后失败可能已改变磁盘，必须成功 load 对账再继续发送。
+runtime mutation 30 秒超时后使会话失效并尝试终止 provider，用户重连 ACP 再显式 load；不会自动重放 mutation。POSIX 将 provider（包括默认 Node launcher 及 native 子进程）置于独立进程组，通过私有控制管道请求组内 guardian 执行 SIGKILL；launcher/supervisor 退出或适配器管道关闭也触发清理。适配器不会向保存的 POSIX PID/PGID 发破坏性信号。只有 supervisor 已退出且组已消失才报告终止成功；无法确认或五秒超时均报失败。主动脱离该组的进程不在保证内。Windows 对仍存活的 owned launcher 使用 taskkill /T /F；launcher 已退出时无法再确认整树归属，明确报错且不针对旧 PID 清树。重复关闭复用同一结果，包括失败。读取超时返回 unavailable。历史回退 dispatch 后失败可能已改变磁盘，必须成功 load 对账再继续发送。
+
+POSIX 监督复用当前运行时，不新增外部 Node 依赖。Bun 编译产物通过固定内置 supervisor/guardian 模式重入，在加载 ACP 模块或读取配置/日志设置前分发；模式要求私有管道描述符，不接收可执行源码。Node 和直接 Bun 运行使用同一份内置 helper 实现。两个小型 helper 分别负责保留 provider 退出状态和从 owned 组内部清理，不解释 ACP 消息；stdin EOF 和 stdout/stderr 使用继承的文件描述符，常规终止信号转发给 provider，额外控制管道在适配器中 unref。POSIX provider 启动失败通过 stderr 和 supervisor 退出码 1 报告。宿主 init 必须回收孤儿进程（容器使用 --init）；未回收的组可能超时报错，不虚报已停止。compiled native CODEX_PATH 路径已在 PATH 不含 Node 的条件下验证；这不代表另一个 bundled JavaScript launcher 路径在 compiled 发行物中的兼容性已得到验证。
 
 ## 尚未实现的 Desktop 能力
 
