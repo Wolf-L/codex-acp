@@ -15,7 +15,7 @@ Read the `initialize` metadata before invoking any extension. These are named me
 | `_meta.archive` | `_session/archive`, `_session/unarchive` | `{sessionId}`; reversible native archive, same ID. Existing standard session/delete keeps its prior archive-backed behavior. No permanent delete. Archive closes local routing; unarchive requires load to reopen. |
 | `_meta.discovery` | `_session/search` | Bounded searchTerm/cursor/limit/archived. Searches user sources appServer/cli/vscode. Current native search can miss text retained only through ancestor rollout lineage after rewind. |
 | `_meta.discovery` | `_session/attachments` | list/add/remove native metadata only. Does not create/delete a file, worktree, PR or prompt attachment. Loaded-session ownership required. |
-| `_meta.queue` | `_session/queue` | Only list is advertised after actual-native version and positive nonmutating method probe. Writes/start return unsupported before native mutation. Pending native queues prevent ACP load/resume to avoid unowned auto-dispatch. |
+| `_meta.queue` | `_session/queue` | list/add/update/delete/reorder/start, each advertised only after its actual-native nonmutating registration probe. Native storage and dispatch remain authoritative. See [queue controls](native-queue-controls.md). |
 | `_meta.fileRevert` | `_session/files/revert` | `{sessionId,toolCallId,dryRun,previewToken?}`; reverse one completed native fileChange tool's recorded text patches in Git. Preview token required for apply. History stays unchanged. |
 
 ## File reversal
@@ -34,7 +34,7 @@ Runtime mutations have a 30-second deadline. Timeout invalidates local sessions 
 
 Supported and locally exercised: same-ID first/latest/historical/repeated rewind, cancel-and-settle, cold load, resend context truncation, runtime status/control, archive/unarchive, attachment metadata persistence, safe idle steering, native search of current rollout, queue inspection and per-tool text patch reversal.
 
-Not claimed: full native queue automatic-turn adoption, realtime audio/voice, timeline API, complete Desktop project/worktree/UI management, whole-session file checkpoint restore, binary reverse patches, all child process/background writer isolation, or complete search over retained ancestor rollouts. A native schema method does not establish an implemented ACP handler.
+Not claimed: realtime audio/voice, timeline API, complete Desktop project/worktree/UI management, whole-session file checkpoint restore, binary reverse patches, all child process/background writer isolation, or complete search over retained ancestor rollouts. A native schema method does not establish an implemented ACP handler.
 
 ## Validation
 

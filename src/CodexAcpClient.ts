@@ -62,7 +62,7 @@ import type {AuthenticationStatusResponse} from "./AcpExtensions";
 import {createCodexCollaborationMode} from "./CollaborationModeConfig";
 import type {ModeKind} from "./app-server/ModeKind";
 import {arePathBasenamesEqual, arePathsEqual, isAbsolutePathLike} from "./PathUtils";
-import {CodexSubagentSubscriptions} from "./subagents/CodexSubagentSubscriptions";
+import {CodexSubagentSubscriptions, type Subscription} from "./subagents/CodexSubagentSubscriptions";
 import {forkSession as runForkSession} from "./SessionFork";
 import {rewindSession as runRewindSession, type SessionRewindRequest} from "./SessionRewind";
 import type {SessionMetadata, SessionMetadataWithThread} from "./SessionMetadata";
@@ -136,6 +136,21 @@ const SUPPORTED_GATEWAY_PROTOCOLS: Record<acp.LlmProtocol, WireApi> = {
  * Converts ACP requests into corresponding app-server operations.
  */
 export class CodexAcpClient {
+    private readonly promptEventResets = new Map<string, () => void>();
+    resumePromptEvents(sessionId: string): void { this.promptEventResets.get(sessionId)?.(); }
+    private readonly promptEventReleases = new Map<string, () => void>();
+    finishPromptEvents(sessionId: string): void { this.promptEventReleases.get(sessionId)?.(); }
+    private readonly queueSubscriptions = new Map<string, Parameters<CodexAcpClient["subscribeToSessionEvents"]>>();
+    private readonly sessionEventGenerations = new Map<string, symbol>();
+
+    async subscribeToQueueEvents(...subscription: Parameters<CodexAcpClient["subscribeToSessionEvents"]>): Promise<void> {
+        this.sessionEventGenerations.set(subscription[0], Symbol());
+        this.subagents.clear(subscription[0]);
+        this.queueSubscriptions.set(subscription[0], subscription);
+        subscription[7] = true;
+        await this.subscribeToSessionEvents(...subscription);
+    }
+
     private readonly codexClient: CodexAppServerClient;
     private readonly config: JsonObject;
     private readonly modelProvider: string | null;
@@ -167,11 +182,12 @@ export class CodexAcpClient {
         return this.codexClient;
     }
 
-    queueSupport: SessionQueueSupport = {nativeVersion: null, actions: []};
 
     private readonly defaultClientInfo: ClientInfo = {
         name: `${packageJson.name}`, title: "Codex ACP", version: `${packageJson.version}`
     };
+
+    queueSupport: SessionQueueSupport = {nativeVersion: null, actions: []};
 
     async initialize(request: acp.InitializeRequest): Promise<void> {
         const response = await this.codexClient.initialize({
@@ -186,10 +202,9 @@ export class CodexAcpClient {
             }
         });
         this.configPath = response?.codexHome ?? null;
-        // Native userAgent uses the requesting client name when Desktop originator env is absent.
-        // Its /version segment is the running native version, not clientInfo.version.
+        // The running app-server version, not the ACP client or npm package version.
         const version = response?.userAgent?.match(/^[^/]+\/(\d+\.\d+\.\d+)\s+\(/)?.[1];
-        this.queueSupport = await probeSessionQueueSupport(version, action => action === "list" ? this.codexClient.probeQueueAction(action) : Promise.resolve(false));
+        this.queueSupport = await probeSessionQueueSupport(version, action => this.codexClient.probeQueueAction(action));
     }
 
     getHomePath(): string | null {
@@ -790,11 +805,18 @@ export class CodexAcpClient {
     }
 
     async closeSession(sessionId: string): Promise<void> {
+        const generation = this.sessionEventGenerations.get(sessionId);
         try {
             await this.codexClient.threadUnsubscribe({threadId: sessionId});
         } finally {
-            this.codexClient.clearThreadHandlers(sessionId);
-            this.subagents.clear(sessionId);
+            if (this.sessionEventGenerations.get(sessionId) === generation) {
+                this.sessionEventGenerations.delete(sessionId);
+                this.queueSubscriptions.delete(sessionId);
+                this.promptEventResets.delete(sessionId);
+                this.promptEventReleases.delete(sessionId);
+                this.codexClient.clearThreadHandlers(sessionId);
+                this.subagents.clear(sessionId);
+            }
         }
     }
 
@@ -1086,10 +1108,53 @@ export class CodexAcpClient {
         supportsSubagents: boolean,
         observeInteraction: (result: ServerNotification) => void | Promise<void>,
         waitForChildSession: (childThreadId: string) => Promise<string | null>,
+        queueOwner = false,
+        captureChild?: (childThreadId: string) => Subscription,
+        observeNativeLifecycle?: (event: ServerNotification) => void,
     ) {
+        const generation = this.sessionEventGenerations.get(sessionId) ?? Symbol();
+        this.sessionEventGenerations.set(sessionId, generation);
+        const isCurrent = () => this.sessionEventGenerations.get(sessionId) === generation;
+        // A prompt may hand off to its queue owner, but never to a later open
+        // of the same session. Resolve only within this subscription generation.
+        const queueSubscription = this.queueSubscriptions.get(sessionId);
+        let promptFinished = queueOwner;
+        if (!queueOwner) this.promptEventResets.set(sessionId, () => { promptFinished = false; });
+        if (!queueOwner) this.promptEventReleases.set(sessionId, () => { promptFinished = true; });
+        const current = () => promptFinished ? queueSubscription : undefined;
         const dispatch = (event: ServerNotification) => {
-            this.enqueueSessionNotification(sessionId, () => eventHandler(event));
+            if (!isCurrent()) return;
+            (queueSubscription?.[9] ?? observeNativeLifecycle)?.(event);
+            this.enqueueSessionNotification(sessionId, async () => {
+                if (!isCurrent()) return;
+                const owner = event.method === "thread/queue/changed" ? queueSubscription : current();
+                await (owner?.[1] ?? eventHandler)(event);
+                if (event.method === "turn/completed" && event.params.threadId === sessionId) promptFinished = true;
+            });
         };
+        const stable: Subscription = {
+            rootSessionId: sessionId, supportsSubagents,
+            dispatch: eventHandler,
+            enqueueInteraction: observeInteraction,
+            approvalHandler, elicitationHandler,
+            waitForRootNotifications: () => this.waitForSessionNotifications(sessionId), waitForChildSession,
+        };
+        const deferredSubscription = (captured: Promise<Subscription>): Subscription => ({
+            ...stable,
+            dispatch: event => this.enqueueSessionNotification(sessionId, async () => { const owner = await captured; if (isCurrent()) await owner.dispatch(event); }),
+            enqueueInteraction: event => this.enqueueSessionNotification(sessionId, async () => { const owner = await captured; if (isCurrent()) await owner.enqueueInteraction(event); }),
+            approvalHandler: {
+                handleCommandExecution: async p => { const owner = await captured; return isCurrent() ? owner.approvalHandler.handleCommandExecution(p) : {decision: "cancel"}; },
+                handleFileChange: async p => { const owner = await captured; return isCurrent() ? owner.approvalHandler.handleFileChange(p) : {decision: "cancel"}; },
+                handlePermissionsRequest: async p => { const owner = await captured; return isCurrent() ? owner.approvalHandler.handlePermissionsRequest(p) : {permissions: {}, scope: "turn", strictAutoReview: false}; },
+            },
+            elicitationHandler: {
+                handleElicitation: async p => { const owner = await captured; return isCurrent() ? owner.elicitationHandler.handleElicitation(p) : {action: "cancel", content: null, _meta: null}; },
+                handleUserInput: async p => { const owner = await captured; return isCurrent() ? owner.elicitationHandler.handleUserInput(p) : {answers: {}}; },
+            },
+            waitForChildSession: async id => { const owner = await captured; return isCurrent() ? owner.waitForChildSession(id) : null; },
+            captureChild: id => deferredSubscription(captured.then(owner => owner.captureChild?.(id) ?? owner)),
+        });
         this.subagents.subscribe({
             rootSessionId: sessionId,
             supportsSubagents,
@@ -1098,12 +1163,25 @@ export class CodexAcpClient {
                 // Child observation uses the same serialized, error-reporting queue
                 // as ordinary session notifications; callers intentionally do not
                 // await the callback registered with app-server.
-                this.enqueueSessionNotification(sessionId, () => observeInteraction(event));
+                this.enqueueSessionNotification(sessionId, () => { if (isCurrent()) return (current()?.[5] ?? observeInteraction)(event); });
             },
-            approvalHandler,
-            elicitationHandler,
+            approvalHandler: {
+                handleCommandExecution: async params => isCurrent() ? (current()?.[2] ?? approvalHandler).handleCommandExecution(params) : {decision: "cancel"},
+                handleFileChange: async params => isCurrent() ? (current()?.[2] ?? approvalHandler).handleFileChange(params) : {decision: "cancel"},
+                handlePermissionsRequest: async params => isCurrent() ? (current()?.[2] ?? approvalHandler).handlePermissionsRequest(params) : {permissions: {}, scope: "turn", strictAutoReview: false},
+            },
+            elicitationHandler: {
+                handleElicitation: async params => isCurrent() ? (current()?.[3] ?? elicitationHandler).handleElicitation(params) : {action: "cancel", content: null, _meta: null},
+                handleUserInput: async params => isCurrent() ? (current()?.[3] ?? elicitationHandler).handleUserInput(params) : {answers: {}},
+            },
             waitForRootNotifications: () => this.waitForSessionNotifications(sessionId),
-            waitForChildSession,
+            waitForChildSession: async id => isCurrent() ? (current()?.[6] ?? waitForChildSession)(id) : null,
+            captureChild: this.queueSubscriptions.has(sessionId) ? childThreadId => {
+                let resolve!: (value: Subscription) => void;
+                const captured = new Promise<Subscription>(r => { resolve = r; });
+                this.enqueueSessionNotification(sessionId, () => { resolve(isCurrent() ? current()?.[8]?.(childThreadId) ?? captureChild?.(childThreadId) ?? stable : stable); });
+                return deferredSubscription(captured);
+            } : undefined,
         });
     }
 

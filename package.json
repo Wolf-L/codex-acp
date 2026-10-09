@@ -44,7 +44,8 @@
     "test:compiled-process": "node scripts/CodexProcessTermination-smoke.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p examples/tsconfig.json",
-    "codex-test": "tsx .claude/skills/run-codex/scripts/run-codex-test.ts"
+    "codex-test": "tsx .claude/skills/run-codex/scripts/run-codex-test.ts",
+    "test:native-queue": "node scripts/native-queue.mjs"
   },
   "homepage": "https://github.com/agentclientprotocol/codex-acp#readme",
   "bugs": {

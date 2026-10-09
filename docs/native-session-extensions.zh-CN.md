@@ -11,7 +11,7 @@
 - archive/unarchive：原生可逆归档、同 ID；不新增永久删除。旧 session/delete 仍保持原来的 archive 语义。
 - search：限定参数和 appServer/cli/vscode 来源；已验证当前 rollout synthetic 文本命中。回退后仅保留在祖先 rollout 的文本可能被原生搜索漏掉。
 - attachments：原生 thread 元数据 list/add/remove、冷重启持久化；不创建/删除磁盘文件、PR 或 worktree。
-- queue：只在真实 native 版本和无副作用探测通过后广告 list。写入/start 在 native mutation 前 unsupported；已有 durable pending queue 阻止 ACP load/resume，避免无人归属的自动生成。
+- queue：按真实 native 无副作用探测逐项开放 list/add/update/delete/reorder/start，接管自动轮次的输出、审批与取消，保留原生存储和派发。详见[队列协议说明（中英文）](native-queue-controls.md)。
 - files/revert：限定单个已完成 native fileChange 工具的 Git 文本补丁。preview token 绑定原生补丁与文件指纹，提交前复核；不改会话历史。
 
 ## 文件语义与恢复
@@ -24,7 +24,7 @@ POSIX 监督复用当前运行时，不新增外部 Node 依赖。Bun 编译产�
 
 ## 尚未实现的 Desktop 能力
 
-完整队列自动回合 observer/adoption、realtime voice、timeline、Desktop 项目/worktree/UI 全部管理、全工作区文件 checkpoint、二进制反向恢复、外部写入进程完全隔离、祖先 rollout 全文搜索均不宣称完成。native schema 存在某方法不等于本 ACP 已支持。
+realtime voice、timeline、Desktop 项目/worktree/UI 全部管理、全工作区文件 checkpoint、二进制反向恢复、外部写入进程完全隔离、祖先 rollout 全文搜索均不宣称完成。native schema 存在某方法不等于本 ACP 已支持。
 
 ## 验证
 
