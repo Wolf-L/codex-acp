@@ -64,4 +64,6 @@ An active prompt is cancelled only after the target validates; the adapter waits
 
 History rewind does not restore files. See [native session extensions](native-session-extensions.md) for the separate, previewed single-tool Git patch reversal.
 
-The interface and original implementation come from [Nikita Ashikhmin's PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508), preserved as four commits in this branch. This local integration merges current main and adds validation/lifecycle safeguards; it is not a new incompatible rewind protocol.
+The interface and original implementation come from [Nikita Ashikhmin's PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508). This refresh is based on upstream main `202e66e` (2.2.2) and adds validation/lifecycle safeguards; it is not a new incompatible rewind protocol. The historical commits were consolidated during refresh, not retained as a four-commit chain.
+
+Rewind invalidates pending automatic titles and waits for already dispatched title writes, including work retained from older load/resume/close states. A pending or unacknowledged native title write prevents history mutation. The ordinary bounded load/title wait remains unchanged. Current upstream app-server recovery, custom instructions and sessionIndex behavior are preserved; new index mutations share the rewind admission fence.
