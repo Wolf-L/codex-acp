@@ -38,6 +38,7 @@ export class TitleGenerator {
     private generated = false;
     private existingTitle = false;
     private generation = 0;
+    private retired = false;
     /** Kept even on failure: a lost acknowledgement does not prove the native write was cancelled. */
     private dispatchedWrite: Promise<unknown> | null = null;
     /** The generated title was dropped for an explicit title, see {@link retryAfterFailedRename}. */
@@ -85,6 +86,17 @@ export class TitleGenerator {
     }
 
     /**
+     * A replaced/closed SessionState cannot start new work. Existing work keeps the upstream
+     * load/title behavior, but its drain obligation belongs to the session until acknowledged.
+     * Unlike waitForIdle, this is unbounded and preserves native write failures.
+     */
+    async retire(): Promise<void> {
+        this.retired = true;
+        await this.inFlight;
+        await this.dispatchedWrite;
+    }
+
+    /**
      * Call when an explicit rename failed. A title that this generator dropped for that rename is generated
      * again after the next turn, as if the rename had never come.
      */
@@ -113,7 +125,7 @@ export class TitleGenerator {
      *                        not turn.items — turn.items contains only agent output).
      */
     onTurnCompleted(userPromptText: string): void {
-        if (this.generated) return;
+        if (this.retired || this.generated) return;
         const src = this.getSessionTitleSource();
         // "explicit": user renamed or session loaded with a name — skip
         // "unknown": resumed session with indeterminate history — skip

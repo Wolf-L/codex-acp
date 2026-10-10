@@ -381,6 +381,8 @@ export class CodexAcpServer {
     private providerUpdate: Promise<void> | null = null;
     private readonly rewinds = new Map<string, Promise<void>>();
     private readonly rewindRecoveryRequired = new Set<string>();
+    /** Old SessionStates may still own asynchronous title work for the same native thread. */
+    private readonly retiredTitleGenerators = new Map<string, Set<TitleGenerator>>();
     private readonly sessionOperations = new Map<string, number>();
     /** The AIR `sessionIndex` extension, see `SessionIndexService.ts`. */
     readonly sessionIndex = new SessionIndexService({
@@ -594,8 +596,8 @@ export class CodexAcpServer {
                             throw RequestError.invalidRequest("Prompt has not settled; rewind was not dispatched");
                         }
                     }
-                    const titleWrite = state.titleGen?.invalidateForRewind();
-                    if (titleWrite && await settledWithin(titleWrite, 10_000) === "pending") {
+                    const titleWrite = this.invalidateSessionTitles(params.sessionId, state.titleGen);
+                    if (await settledWithin(titleWrite, 10_000) === "pending") {
                         throw RequestError.invalidRequest("Automatic title write is still pending; rewind was not dispatched");
                     }
                     await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
@@ -1218,8 +1220,35 @@ export class CodexAcpServer {
     }
 
     private installSessionState(sessionState: SessionState): void {
-        this.sessions.get(sessionState.sessionId)?.asyncTasks.clear();
+        const previous = this.sessions.get(sessionState.sessionId);
+        previous?.asyncTasks.clear();
+        this.retainRetiredTitleGenerator(sessionState.sessionId, previous?.titleGen);
         this.sessions.set(sessionState.sessionId, sessionState);
+    }
+
+    private retainRetiredTitleGenerator(sessionId: string, title: TitleGenerator | undefined): void {
+        if (!title) return;
+        let retired = this.retiredTitleGenerators.get(sessionId);
+        if (!retired) this.retiredTitleGenerators.set(sessionId, retired = new Set());
+        retired.add(title);
+        void title.retire().then(() => this.forgetRetiredTitleGenerator(sessionId, title), () => {
+            // Keep an unacknowledged native write fenced, including across close/reopen.
+        });
+    }
+
+    private forgetRetiredTitleGenerator(sessionId: string, title: TitleGenerator): void {
+        const retired = this.retiredTitleGenerators.get(sessionId);
+        retired?.delete(title);
+        if (retired?.size === 0) this.retiredTitleGenerators.delete(sessionId);
+    }
+
+    private async invalidateSessionTitles(sessionId: string, current: TitleGenerator | undefined): Promise<void> {
+        const titles = new Set(this.retiredTitleGenerators.get(sessionId));
+        if (current) titles.add(current);
+        await Promise.all([...titles].map(async title => {
+            await title.invalidateForRewind();
+            this.forgetRetiredTitleGenerator(sessionId, title);
+        }));
     }
 
     private getAuthProviderForAuthenticateRequest(request: acp.AuthenticateRequest): string | null {
@@ -1416,6 +1445,7 @@ export class CodexAcpServer {
             logger.log("Session closed", {sessionId: params.sessionId});
         } finally {
             if (this.getSessionGeneration(params.sessionId) === closeGeneration) {
+                this.retainRetiredTitleGenerator(params.sessionId, this.sessions.get(params.sessionId)?.titleGen);
                 this.sessions.delete(params.sessionId);
                 this.mcpSessionStartup.close(params.sessionId);
                 this.codexAcpClient.appServerClient.mcpStartup.forgetThread(params.sessionId);
