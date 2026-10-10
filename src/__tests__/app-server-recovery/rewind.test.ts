@@ -22,6 +22,28 @@ async function setup() {
 }
 
 describe("rewind with current app-server recovery and session index", () => {
+    it("lets close interrupt the prompt that an earlier provider update is waiting for", async () => {
+        const fixture = await setup();
+        fixture.agent.getSessionState(fixture.sessionId).titleGen?.markExistingTitle();
+        const native = fixture.current();
+        const finish = () => native.rpc.notify({method: "turn/completed", params: {
+            threadId: fixture.sessionId,
+            turn: {id: "active-turn", items: [], status: "interrupted", error: null},
+        }});
+        fixture.answers.set("turn/start", () => ({turn: {id: "active-turn", items: [], status: "inProgress", error: null}}));
+        fixture.answers.set("turn/interrupt", () => {setImmediate(finish); return {};});
+        const prompt = fixture.agent.prompt({sessionId: fixture.sessionId, prompt: [{type: "text", text: "running"}]});
+        await vi.waitFor(() => expect(fixture.agent.getSessionState(fixture.sessionId).currentTurnId).toBe("active-turn"));
+        const provider = fixture.agent.setProvider({providerId: "openai", apiType: "openai", baseUrl: "https://example.test/v1"});
+        const close = fixture.agent.closeSession({sessionId: fixture.sessionId});
+        try {
+            await vi.waitFor(() => expect(requestsOf(native, "turn/interrupt")).toHaveLength(1));
+        } finally {
+            finish();
+            await Promise.all([prompt, provider, close]);
+        }
+    });
+
     it("resumes a crashed session before reading and mutating its history on the replacement process", async () => {
         const fixture = await setup();
         const old = fixture.current();

@@ -553,7 +553,6 @@ export class CodexAcpServer {
     }
 
     private async sessionOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
-        while (this.providerUpdate !== null) await this.waitForProviderUpdate();
         this.assertNotRewinding(sessionId);
         this.sessionOperations.set(sessionId, (this.sessionOperations.get(sessionId) ?? 0) + 1);
         try { return await operation(); }
@@ -1978,7 +1977,6 @@ export class CodexAcpServer {
     async setSessionMode(
         _params: acp.SetSessionModeRequest,
     ): Promise<acp.SetSessionModeResponse> {
-        while (this.providerUpdate !== null) await this.providerUpdate;
         this.assertNotRewinding(_params.sessionId);
         logger.log("Set session mode requested", {
             sessionId: _params.sessionId,
