@@ -18,7 +18,7 @@ function deferred<T>() {
 }
 const checkpoint = () => new Promise<void>(resolve => setImmediate(resolve));
 
-async function setup(supportsSubagents = true) {
+async function setup(supportsSubagents = true, supportsSessionIndex = false) {
     const f = createCodexMockTestFixture();
     const agent = f.getCodexAcpAgent();
     const client = f.getCodexAcpClient();
@@ -39,7 +39,10 @@ async function setup(supportsSubagents = true) {
     await agent.initialize({
         protocolVersion: 1,
         clientCapabilities: {_meta: {jetbrains: {air: {
-            version: 1, capabilities: supportsSubagents ? ["nativeSubagentSessions"] : [],
+            version: 1, capabilities: [
+                ...(supportsSubagents ? ["nativeSubagentSessions"] : []),
+                ...(supportsSessionIndex ? ["sessionIndex"] : []),
+            ],
         }}}},
     });
     client.queueSupport = {nativeVersion: "0.160.1", actions: SESSION_QUEUE_ACTIONS};
@@ -112,6 +115,34 @@ async function setup(supportsSubagents = true) {
 }
 
 describe("native queue child ownership", () => {
+    it.each(["AIR entry", "direct index"])("blocks %s archive for active and retained queue work without closing it", async route => {
+        const h = await setup(true, true);
+        const close = vi.spyOn(h.agent, "closeSession");
+        const archive = () => route === "AIR entry"
+            ? h.agent.setSessionArchived({sessionId}, true)
+            : h.agent.sessionIndex.setArchived({sessionId}, true);
+        expect(h.agent.sessionIndex.enabled).toBe(true);
+        await h.emit("turn/started", {turn: turn("queued")});
+        try {
+            await expect(archive()).rejects.toMatchObject({data: expect.stringContaining("Queued work is active")});
+            await h.spawn("queued", "retained-child");
+            await h.emit("turn/completed", {turn: turn("queued", "completed")});
+            await checkpoint();
+            await expect(archive()).rejects.toMatchObject({data: expect.stringContaining("Queued work is active")});
+            expect(close).not.toHaveBeenCalled();
+            expect(h.f.getCodexConnectionEvents([]).filter(event => event.eventType === "request"
+                && event.method === "thread/archive")).toEqual([]);
+            expect(await h.approval("retained-child", "still-owned")).toEqual({decision: "accept"});
+        } finally {
+            await h.emit("turn/completed", {turn: turn("turn-retained-child", "completed")}, "retained-child");
+            await h.emit("turn/completed", {turn: turn("queued", "completed")});
+        }
+        await vi.waitFor(() => expect((h.agent as unknown as {queueOwners: Map<string, {active(): boolean}>})
+            .queueOwners.get(sessionId)?.active()).toBe(false));
+        await expect(archive()).resolves.toEqual({});
+        expect(close).toHaveBeenCalledOnce();
+    });
+
     it("routes a reused child thread to the queued turn that sends its new input", async () => {
         const h = await setup();
         await h.emit("turn/started", {turn: turn("first")});

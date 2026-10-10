@@ -57,6 +57,8 @@ export interface SessionIndexHost {
     closeSession(sessionId: string): Promise<void>;
     beginSessionCloseFence(sessionId: string): void;
     endSessionCloseFence(sessionId: string): void;
+    /** Rejects archive while autonomous queue work or an uncertain queue outcome still owns the session. */
+    assertSessionArchiveAllowed?(sessionId: string): void;
     /** Reserves the session against native queue writes and cancellation in flight. */
     runSessionMutation?<T>(sessionId: string, operation: () => Promise<T>): Promise<T>;
 }
@@ -212,8 +214,11 @@ export class SessionIndexService {
     }
 
     private async setArchivedDuringOperation(sessionId: string, archived: boolean): Promise<Record<string, never>> {
+        this.host.assertSessionArchiveAllowed?.(sessionId);
         logger.log(archived ? "Archiving session..." : "Unarchiving session...", {sessionId});
         await this.host.ensureAppServer();
+        // Native work can arrive while readiness is pending. Recheck before closing or archiving it.
+        this.host.assertSessionArchiveAllowed?.(sessionId);
         // Read before the fence, which counts as open.
         const open = this.host.hasLocalSession(sessionId);
         // An open of the session that starts meanwhile would load the thread that Codex archives.

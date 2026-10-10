@@ -596,6 +596,7 @@ export class CodexAcpServer {
         },
         beginSessionCloseFence: (sessionId) => this.beginSessionCloseFence(sessionId),
         endSessionCloseFence: (sessionId) => this.endSessionCloseFence(sessionId),
+        assertSessionArchiveAllowed: (sessionId) => this.assertQueueIdleForHistory(sessionId),
         runSessionMutation: (sessionId, operation) => {
             if (this.queueCancellations.has(sessionId)) throw RequestError.invalidRequest("Session cancellation is in progress");
             return this.sessionOperation(sessionId, async () => {
