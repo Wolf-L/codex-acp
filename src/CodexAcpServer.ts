@@ -638,11 +638,16 @@ export class CodexAcpServer {
             if (sessionReady) await sessionReady;
             const result = await this.runWithProcessCheck(() => this.codexAcpClient.rewindSession(params, {
                 beforeMutation: async () => {
-                    if (!prompt) return;
-                    prompt.requestCancel();
-                    if (prompt.currentTurn) await this.requestTurnInterrupt(prompt.currentTurn, "Cancel");
-                    if (await settledWithin(prompt.completion, 10_000) === "pending") {
-                        throw RequestError.invalidRequest("Prompt has not settled; rewind was not dispatched");
+                    if (prompt) {
+                        prompt.requestCancel();
+                        if (prompt.currentTurn) await this.requestTurnInterrupt(prompt.currentTurn, "Cancel");
+                        if (await settledWithin(prompt.completion, 10_000) === "pending") {
+                            throw RequestError.invalidRequest("Prompt has not settled; rewind was not dispatched");
+                        }
+                    }
+                    const titleWrite = state.titleGen?.invalidateForRewind();
+                    if (titleWrite && await settledWithin(titleWrite, 10_000) === "pending") {
+                        throw RequestError.invalidRequest("Automatic title write is still pending; rewind was not dispatched");
                     }
                     await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
                 },

@@ -1,6 +1,7 @@
 import {createHash} from "node:crypto";
 import {describe, expect, it, vi} from "vitest";
 import {SESSION_REWIND_METHOD} from "../../SessionRewind";
+import type {CodexAcpClient} from "../../CodexAcpClient";
 import {createRecoveryFixture, defaultAnswer, initialize, requestsOf} from "./recovery-fixture";
 
 async function setup() {
@@ -22,6 +23,45 @@ async function setup() {
 }
 
 describe("rewind with current app-server recovery and session index", () => {
+    it("discards a pending automatic title result when rewinding an idle session", async () => {
+        const fixture = await setup();
+        const title = fixture.agent.getSessionState(fixture.sessionId).titleGen!;
+        const native = (fixture.agent as unknown as {codexAcpClient: CodexAcpClient}).codexAcpClient.appServerClient;
+        let release!: (value: unknown) => void;
+        const model = vi.spyOn(native, "runTurn").mockImplementation(() => new Promise(resolve => {
+            release = value => resolve(value as never);
+        }));
+        title.onTurnCompleted("original");
+        await vi.waitFor(() => expect(model).toHaveBeenCalledOnce());
+        await expect(fixture.rewind()).resolves.toEqual({rewound: true});
+        release({turn: {items: [{type: "agentMessage", text: '{"title":"Discarded title"}'}]}});
+        await new Promise(resolve => setImmediate(resolve));
+        expect(requestsOf(fixture.current(), "thread/name/set")).toEqual([]);
+    });
+
+    it("refuses history mutation if an earlier title write does not settle before the deadline", async () => {
+        const fixture = await setup();
+        const title = fixture.agent.getSessionState(fixture.sessionId).titleGen!;
+        const native = (fixture.agent as unknown as {codexAcpClient: CodexAcpClient}).codexAcpClient.appServerClient;
+        vi.spyOn(native, "runTurn").mockResolvedValue({turn: {items: [{type: "agentMessage", text: '{"title":"Pending title"}'}]}} as never);
+        fixture.answers.set("thread/name/set", () => undefined);
+        title.onTurnCompleted("original");
+        await vi.waitFor(() => expect(requestsOf(fixture.current(), "thread/name/set")).toHaveLength(1));
+        vi.useFakeTimers();
+        try {
+            const pending = fixture.rewind();
+            const rejected = expect(pending).rejects.toMatchObject({data: expect.stringContaining("title write is still pending")});
+            await vi.advanceTimersByTimeAsync(10_000);
+            await rejected;
+            expect(requestsOf(fixture.current(), "thread/rollback")).toEqual([]);
+            fixture.current().rpc.resolve("thread/name/set", {});
+            await expect(fixture.rewind()).resolves.toEqual({rewound: true});
+            expect(requestsOf(fixture.current(), "thread/rollback")).toHaveLength(1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it("lets close interrupt the prompt that an earlier provider update is waiting for", async () => {
         const fixture = await setup();
         fixture.agent.getSessionState(fixture.sessionId).titleGen?.markExistingTitle();
