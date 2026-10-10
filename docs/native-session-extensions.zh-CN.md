@@ -1,14 +1,14 @@
 # 本地原生会话扩展
 
-本测试版在 main `51aa211` 上整合 PR #508，adapter 2.1.1，冻结 Codex 0.160.1、SDK 1.5.0。保留主线 hooks、附件回放、工具调用协议与压缩处理。没有改 Codeg、全局安装、push 或新 PR。
+本分支在上游 `202e66e` 上整合 [PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508) 的同会话回退协议，adapter 2.2.2，冻结 Codex 0.160.1。保留上游自定义指令、会话索引订阅、进程崩溃恢复，以及 hooks、附件回放、工具调用与压缩处理。
 
 ## 已接入
 
-- `_session/rewind`：保留原接口和作者提交；同 ID 回退首条、历史、最近消息。验证指纹/保留边界，生成中先取消并等待旧 prompt 清理，再调用原生回退并核验持久前缀。
+- `_session/rewind`：保留原接口并注明作者来源；同 ID 回退首条、历史、最近消息。验证指纹/保留边界，生成中先取消并等待旧 prompt 清理，再调用原生回退并核验持久前缀。
 - `_session/steering`：opt-in `_meta.steering.idleBehavior:"promptRequired"`，空闲返回 promptRequired，不偷偷启动模型。未 opt-in 保留旧行为。
 - runtime read：context、usage、mcp、commands（native skills）、plugins。未知用量保留 null，不捏造分类。
 - runtime control：reloadSkills、reconnectMcp、reloadPlugins；后两者要求 provider 空闲，确认回执不等于 runtimeReady。技能刷新后重发可用命令。
-- archive/unarchive：原生可逆归档、同 ID；不新增永久删除。旧 session/delete 仍保持原来的 archive 语义。
+- archive/unarchive：原生可逆归档、同 ID。声明 AIR `sessionIndex` 的客户端使用上游索引实现，保留列表通知和幂等性；其它客户端保留本扩展的归档回执。保留上游 session/delete 行为，包括索引客户端的永久删除。
 - search：限定参数和 appServer/cli/vscode 来源；已验证当前 rollout synthetic 文本命中。回退后仅保留在祖先 rollout 的文本可能被原生搜索漏掉。
 - attachments：原生 thread 元数据 list/add/remove、冷重启持久化；不创建/删除磁盘文件、PR 或 worktree。
 - queue：只在真实 native 版本和无副作用探测通过后广告 list。写入/start 在 native mutation 前 unsupported；已有 durable pending queue 阻止 ACP load/resume，避免无人归属的自动生成。
@@ -28,6 +28,6 @@ POSIX 监督复用当前运行时，不新增外部 Node 依赖。Bun 编译产�
 
 ## 验证
 
-Windows 完整套件 82 文件通过/8 跳过，1342 项通过/39 跳过；typecheck/build 通过；文件/lifecycle 增量 28 项通过。0.160.1 与 CODEX_PATH 0.159.3 的真实 ACP+native+localhost mock 模型隔离实验通过，未调用真实模型或用户会话。独立定向 review 六项复现全通过（含真实 owned-child 终止）；独立文件 RPC E2E 九项通过，覆盖真实 apply_patch、持久回放、预览、陈旧/冲突拒绝、index/无关文件字节保持、同会话继续；仍不代表所有交错均已验证。
+运行 `npm run typecheck`、`npm test`、`npm run build`、`npm run bundle:all`、`npm run test:native` 和 `npm run test:compiled-process`。仓库内原生测试使用隔离 home/workspace 和本地模拟模型，检查同会话冷启动回退及真实文本补丁恢复，不使用用户账号。本次同步还覆盖扩展请求前的崩溃恢复、恢复会话前拒绝待发原生队列，以及会话索引修改互斥。具体提交的结果以 PR 验证记录为准，旧分支测试数字不代表当前修订已通过。
 
-协议细节见 [English](native-session-extensions.md)；原 rewind 作者 Nikita Ashikhmin，来源 [PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508)，四条原提交保留在历史中。
+协议细节见 [English](native-session-extensions.md)；原 rewind 作者 Nikita Ashikhmin，来源 [PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508)。

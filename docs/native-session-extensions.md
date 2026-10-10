@@ -1,6 +1,6 @@
 # Local native session extensions
 
-This local test build integrates PR #508 on main `51aa211` (adapter 2.1.1, locked Codex 0.160.1, ACP SDK 1.5.0). It preserves current-main hooks, attachments, tool-call reports and compaction handling. No Codeg changes, global installation, push or new PR are included.
+This branch integrates the same-session rewind contract from [PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508) on upstream `202e66e` (adapter 2.2.2, locked Codex 0.160.1). It preserves upstream custom instructions, session-index subscriptions and app-server recovery, alongside hooks, attachments, tool-call reports and compaction handling.
 
 ## Negotiated operations
 
@@ -12,7 +12,7 @@ Read the `initialize` metadata before invoking any extension. These are named me
 | `_meta.steering.idleBehavior` | `_session/steering` | Opt in with `_meta.steering.idleBehavior:"promptRequired"`; idle returns `{outcome:"promptRequired"}` without starting a model request. Non-opted clients retain the existing idle new-turn behavior. |
 | `_meta.runtime` | `_session/runtime/read` | `resource`: context, usage, mcp, commands, plugins. Unknown measurements stay null. Commands are native skills; this is not a list of every Desktop UI command. |
 | `_meta.runtime` | `_session/runtime/control` | `action`: reloadSkills, reconnectMcp, reloadPlugins. Skill reload republishes available commands. MCP/plugins are provider-wide idle operations; their acknowledgement is not runtime readiness. |
-| `_meta.archive` | `_session/archive`, `_session/unarchive` | `{sessionId}`; reversible native archive, same ID. Existing standard session/delete keeps its prior archive-backed behavior. No permanent delete. Archive closes local routing; unarchive requires load to reopen. |
+| `_meta.archive` | `_session/archive`, `_session/unarchive` | `{sessionId}`; reversible native archive, same ID. Clients declaring AIR `sessionIndex` use the upstream index implementation, including list notifications and idempotence; other clients retain this extension's archive response. Upstream session/delete behavior, including indexed permanent deletion, is preserved. |
 | `_meta.discovery` | `_session/search` | Bounded searchTerm/cursor/limit/archived. Searches user sources appServer/cli/vscode. Current native search can miss text retained only through ancestor rollout lineage after rewind. |
 | `_meta.discovery` | `_session/attachments` | list/add/remove native metadata only. Does not create/delete a file, worktree, PR or prompt attachment. Loaded-session ownership required. |
 | `_meta.queue` | `_session/queue` | Only list is advertised after actual-native version and positive nonmutating method probe. Writes/start return unsupported before native mutation. Pending native queues prevent ACP load/resume to avoid unowned auto-dispatch. |
@@ -38,4 +38,4 @@ Not claimed: full native queue automatic-turn adoption, realtime audio/voice, ti
 
 ## Validation
 
-Full suite: 82 test files passed, 8 skipped; 1342 tests passed, 39 skipped on Windows. Typecheck/build passed. Additional file/lifecycle regression: 28 passed. Isolated ACP plus native plus localhost mock model covered 0.160.1 and CODEX_PATH 0.159.3; no real model or real user session was used. Independent focused review passed 6/6 reproductions, including real owned-child termination. The native file RPC E2E passed 9 checks (actual apply_patch, persisted replay, preview, stale/conflict refusal, index/unrelated-byte preservation and same-session continuation). These are scoped findings, not proof of every interleaving.
+Run `npm run typecheck`, `npm test`, `npm run build`, `npm run bundle:all`, `npm run test:native` and `npm run test:compiled-process`. The committed native harness uses isolated homes, workspaces and a loopback model; it checks cold same-session rewind and actual text-patch restoration without user accounts. The refresh also tests crash recovery before extension calls, pending-queue refusal before lazy resume, and session-index mutation exclusion. See the PR validation record for results on its exact source revision; earlier branch test counts do not establish results for this revision.
