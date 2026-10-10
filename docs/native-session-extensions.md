@@ -15,7 +15,7 @@ Read the `initialize` metadata before invoking any extension. These are named me
 | `_meta.archive` | `_session/archive`, `_session/unarchive` | `{sessionId}`; reversible native archive, same ID. Clients declaring AIR `sessionIndex` use the upstream index implementation, including list notifications and idempotence; other clients retain this extension's archive response. Upstream session/delete behavior, including indexed permanent deletion, is preserved. |
 | `_meta.discovery` | `_session/search` | Bounded searchTerm/cursor/limit/archived. Searches user sources appServer/cli/vscode. Current native search can miss text retained only through ancestor rollout lineage after rewind. |
 | `_meta.discovery` | `_session/attachments` | list/add/remove native metadata only. Does not create/delete a file, worktree, PR or prompt attachment. Loaded-session ownership required. |
-| `_meta.queue` | `_session/queue` | Only list is advertised after actual-native version and positive nonmutating method probe. Writes/start return unsupported before native mutation. Pending native queues prevent ACP load/resume to avoid unowned auto-dispatch. |
+| `_meta.queue` | `_session/queue` | Native persistent list/add/update/delete/reorder/start, each gated by running-native capability probes. Autonomous turns own output, approvals and cancellation; explicit load adopts persisted work before resume. See [queue controls](native-queue-controls.md). |
 | `_meta.fileRevert` | `_session/files/revert` | `{sessionId,toolCallId,dryRun,previewToken?}`; reverse one completed native fileChange tool's recorded text patches in Git. Preview token required for apply. History stays unchanged. |
 
 ## File reversal
@@ -34,8 +34,12 @@ Runtime mutations have a 30-second deadline. Timeout invalidates local sessions 
 
 Supported and locally exercised: same-ID first/latest/historical/repeated rewind, cancel-and-settle, cold load, resend context truncation, runtime status/control, archive/unarchive, attachment metadata persistence, safe idle steering, native search of current rollout, queue inspection and per-tool text patch reversal.
 
-Not claimed: full native queue automatic-turn adoption, realtime audio/voice, timeline API, complete Desktop project/worktree/UI management, whole-session file checkpoint restore, binary reverse patches, all child process/background writer isolation, or complete search over retained ancestor rollouts. A native schema method does not establish an implemented ACP handler.
+Not claimed: realtime audio/voice, timeline API, complete Desktop project/worktree/UI management, whole-session file checkpoint restore, binary reverse patches, all child process/background writer isolation, or complete search over retained ancestor rollouts. A native schema method does not establish an implemented ACP handler.
 
 ## Validation
 
-Run `npm run typecheck`, `npm test`, `npm run build`, `npm run bundle:all`, `npm run test:native` and `npm run test:compiled-process`. The committed native harness uses isolated homes, workspaces and a loopback model; it checks cold same-session rewind and actual text-patch restoration without user accounts. The refresh also tests crash recovery before extension calls, pending-queue refusal before lazy resume, and session-index mutation exclusion. See the PR validation record for results on its exact source revision; earlier branch test counts do not establish results for this revision.
+Run `npm run typecheck`, `npm test`, `npm run build`, `npm run bundle:all`, `npm run test:native:all` and `npm run test:compiled-process`. The committed native harness uses isolated homes, workspaces and a loopback model; it checks cold same-session rewind and actual text-patch restoration without user accounts. The refresh also tests crash recovery before extension calls, pending-queue refusal before lazy resume, and session-index mutation exclusion. See the PR validation record for results on its exact source revision; earlier branch test counts do not establish results for this revision.
+
+## Integrated operation boundaries
+
+Rewind, file reversal and provider-wide runtime writes share admission with queue mutations. Active/retained autonomous turns must be cancelled and settled; persistent pending entries must be cleared or completed before history/provider changes. A rewind with an unknown outcome also fences subsequent queue writes until explicit load. Ordinary lazy recovery never starts persisted work; explicit load/resume adopts its ownership before native auto-dispatch. All features are delivered in this one integrated proposal, not separate companion PRs.

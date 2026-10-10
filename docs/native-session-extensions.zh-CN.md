@@ -11,7 +11,7 @@
 - archive/unarchive：原生可逆归档、同 ID。声明 AIR `sessionIndex` 的客户端使用上游索引实现，保留列表通知和幂等性；其它客户端保留本扩展的归档回执。保留上游 session/delete 行为，包括索引客户端的永久删除。
 - search：限定参数和 appServer/cli/vscode 来源；已验证当前 rollout synthetic 文本命中。回退后仅保留在祖先 rollout 的文本可能被原生搜索漏掉。
 - attachments：原生 thread 元数据 list/add/remove、冷重启持久化；不创建/删除磁盘文件、PR 或 worktree。
-- queue：只在真实 native 版本和无副作用探测通过后广告 list。写入/start 在 native mutation 前 unsupported；已有 durable pending queue 阻止 ACP load/resume，避免无人归属的自动生成。
+- queue：通过运行中原生版本/能力探测后，提供持久 list/add/update/delete/reorder/start；接管自动轮次的输出、审批、取消，显式 load/resume 在恢复前接管待发工作。详见 [队列协议](native-queue-controls.md)。
 - files/revert：限定单个已完成 native fileChange 工具的 Git 文本补丁。preview token 绑定原生补丁与文件指纹，提交前复核；不改会话历史。
 
 ## 文件语义与恢复
@@ -24,10 +24,14 @@ POSIX 监督复用当前运行时，不新增外部 Node 依赖。Bun 编译产�
 
 ## 尚未实现的 Desktop 能力
 
-完整队列自动回合 observer/adoption、realtime voice、timeline、Desktop 项目/worktree/UI 全部管理、全工作区文件 checkpoint、二进制反向恢复、外部写入进程完全隔离、祖先 rollout 全文搜索均不宣称完成。native schema 存在某方法不等于本 ACP 已支持。
+realtime voice、timeline、Desktop 项目/worktree/UI 全部管理、全工作区文件 checkpoint、二进制反向恢复、外部写入进程完全隔离、祖先 rollout 全文搜索均不宣称完成。native schema 存在某方法不等于本 ACP 已支持。
 
 ## 验证
 
-运行 `npm run typecheck`、`npm test`、`npm run build`、`npm run bundle:all`、`npm run test:native` 和 `npm run test:compiled-process`。仓库内原生测试使用隔离 home/workspace 和本地模拟模型，检查同会话冷启动回退及真实文本补丁恢复，不使用用户账号。本次同步还覆盖扩展请求前的崩溃恢复、恢复会话前拒绝待发原生队列，以及会话索引修改互斥。具体提交的结果以 PR 验证记录为准，旧分支测试数字不代表当前修订已通过。
+运行 `npm run typecheck`、`npm test`、`npm run build`、`npm run bundle:all`、`npm run test:native:all` 和 `npm run test:compiled-process`。仓库内原生测试使用隔离 home/workspace 和本地模拟模型，检查同会话冷启动回退及真实文本补丁恢复，不使用用户账号。本次同步还覆盖扩展请求前的崩溃恢复、恢复会话前拒绝待发原生队列，以及会话索引修改互斥。具体提交的结果以 PR 验证记录为准，旧分支测试数字不代表当前修订已通过。
 
 协议细节见 [English](native-session-extensions.md)；原 rewind 作者 Nikita Ashikhmin，来源 [PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508)。
+
+## 整合边界
+
+回退、文件恢复、provider 级运行修改与队列写入共享互斥。先取消并等自动轮次结束，再清理或完成持久待发条目，才能改变历史/provider；未知回退结果同样禁止队列写入，直到显式 load 对账。普通自动恢复不会启动待发工作，显式 load/resume 则先接管归属再恢复。所有功能放在同一整合 PR，不再拆分 companion。

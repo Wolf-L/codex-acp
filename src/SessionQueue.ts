@@ -131,7 +131,9 @@ export function sessionQueueCapability(support: SessionQueueSupport) {
     if (!eligibleNativeVersion(support.nativeVersion)) return undefined;
     const actions = SESSION_QUEUE_ACTIONS.filter(action => support.actions.includes(action));
     if (actions.length === 0) return undefined;
-    return {version: 1 as const, method: SESSION_QUEUE_METHOD, actions};
+    return {version: 1 as const, method: SESSION_QUEUE_METHOD, actions,
+        ...(actions.includes("add") ? {changedNotification: "_session/queue/changed", turnNotification: "_session/queue/turn"} : {}),
+    };
 }
 
 export type SessionQueueResponse =
@@ -181,6 +183,13 @@ export async function runSessionQueue(
                 })};
         }
     } catch (error) {
+        // Native -32600 is its definitive pre-mutation invalid-request response.
+        // Translate to ACP's error type so its router preserves the validation
+        // failure rather than wrapping vscode-jsonrpc ResponseError as -32603.
+        if (typeof error === "object" && error !== null && "code" in error
+            && (error.code === -32600 || error.code === -32602)) {
+            throw RequestError.invalidParams(undefined, "Native queue rejected this request; refresh the queue and retry with current IDs");
+        }
         // A definitive JSON-RPC method-not-found is safe to report as unsupported.
         // No other error is converted to success/unsupported and nothing retries.
         if (typeof error === "object" && error !== null && "code" in error && error.code === -32601) {

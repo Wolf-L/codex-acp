@@ -136,7 +136,6 @@ describe("session queue native boundary", () => {
         expect(f.native.start).toHaveBeenCalledTimes(1);
     });
     it.each([
-        {code: -32602, message: "thread not found"},
         {code: -32603, message: "storage failed"},
         new Error("response lost after native commit"),
     ])("propagates failures without replaying an uncertain mutation", async error => {
@@ -145,6 +144,13 @@ describe("session queue native boundary", () => {
         await expect(f.run({sessionId: "session", action: "add", input, clientUserMessageId: "client-id"})).rejects.toBe(error);
         expect(f.native.add).toHaveBeenCalledTimes(1);
         expect(f.native.list).not.toHaveBeenCalled();
+    });
+    it.each([-32600, -32602])("keeps a definitive native validation failure as ACP invalid params (%s)", async code => {
+        const f = fixture();
+        f.native.reorder.mockRejectedValue({code, message: "queue reorder must include every queued submission exactly once"});
+        await expect(f.run({sessionId: "session", action: "reorder", queuedSubmissionIds: ["stale"]}))
+            .rejects.toMatchObject({code: -32602, name: "RequestError"});
+        expect(f.native.reorder).toHaveBeenCalledOnce();
     });
 });
 

@@ -34,6 +34,7 @@ describe("rewind lifecycle",()=>{
             ()=>agent.setSessionMode({sessionId,modeId:"read-only"}),
             ()=>agent.setSessionConfigOption({sessionId,configId:"model",value:"m"}),
             ()=>agent.readSessionRuntime({sessionId,resource:"context"}),
+            ()=>agent.manageSessionQueue({sessionId,action:"list"}),
         ]) await expect(attempt()).rejects.toThrow();
         gate.resolve({rewound:true});await pending;
         call.mockRejectedValueOnce(new Error("invalid target"));
@@ -174,7 +175,7 @@ describe("native pending queue admission", () => {
         const {agent,client,native}=setup();client.queueSupport={nativeVersion:"0.160.1",actions:["list"]};
         vi.spyOn(native,"queueNative").mockReturnValue({list:vi.fn().mockResolvedValue({data:[{id:"queued"}],nextCursor:null})} as never);
         const resume=vi.spyOn(client,"resumeSession");
-        await expect(agent.resumeSession({sessionId,cwd:"/test/cwd",mcpServers:[]})).rejects.toMatchObject({data:expect.stringContaining("pending queue")});
+        await expect(agent.resumeSession({sessionId,cwd:"/test/cwd",mcpServers:[]})).rejects.toMatchObject({data:expect.stringContaining("Pending native queue")});
         expect(resume).not.toHaveBeenCalled();
     });
 });

@@ -36,7 +36,8 @@ describe("session extensions after an app-server crash", () => {
         expect(requestsOf(fixture.current(), "thread/queue/list")).toContainEqual({threadId: fixture.sessionId, limit: 1});
         expect(requestsOf(fixture.current(), "thread/resume")).toEqual([]);
         expect(requestsOf(fixture.current(), "turn/start")).toEqual([]);
-        expect(requestsOf(fixture.current(), "thread/queue/start")).toEqual([]);
+        // The integrated queue capability probes registration with invalid, target-free params only.
+        expect(requestsOf(fixture.current(), "thread/queue/start")).toEqual([{}]);
     });
 
     it("restarts before archiving a legacy client session without resuming it", async () => {

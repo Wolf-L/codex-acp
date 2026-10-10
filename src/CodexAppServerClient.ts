@@ -744,26 +744,6 @@ export class CodexAppServerClient {
         }
     }
 
-    /** Invalid parameters only: proves method registration without a valid mutation target. */
-    async probeQueueAction(action: SessionQueueAction): Promise<boolean> {
-        try { await this.connection.sendRequest(`thread/queue/${action}`, {}); return false; }
-        catch (error) {
-            return typeof error === "object" && error !== null && "code" in error && error.code === -32600
-                && "message" in error && error.message === "Invalid request: missing field `threadId`";
-        }
-    }
-
-    queueNative(): SessionQueueNative {
-        return {
-            list: params => this.connection.sendRequest("thread/queue/list", params),
-            add: params => this.connection.sendRequest("thread/queue/add", params),
-            update: params => this.connection.sendRequest("thread/queue/update", params),
-            delete: params => this.connection.sendRequest("thread/queue/delete", params),
-            reorder: params => this.connection.sendRequest("thread/queue/reorder", params),
-            start: params => this.connection.sendRequest("thread/queue/start", params),
-        };
-    }
-
     async threadSearch(params: NativeThreadSearchParams): Promise<NativeThreadSearchResponse> {
         return this.connection.sendRequest<NativeThreadSearchResponse>("thread/search", {...params, sourceKinds: ["appServer", "cli", "vscode"]});
     }
@@ -794,6 +774,26 @@ export class CodexAppServerClient {
 
     async threadDelete(params: ThreadDeleteParams): Promise<ThreadDeleteResponse> {
         return await this.sendRequest({ method: "thread/delete", params: params });
+    }
+
+    /** Invalid parameters only: proves method registration without a valid mutation target. */
+    async probeQueueAction(action: SessionQueueAction): Promise<boolean> {
+        try { await this.connection.sendRequest(`thread/queue/${action}`, {}); return false; }
+        catch (error) {
+            return typeof error === "object" && error !== null && "code" in error && error.code === -32600
+                && "message" in error && error.message === "Invalid request: missing field `threadId`";
+        }
+    }
+
+    queueNative(): SessionQueueNative {
+        return {
+            list: params => this.connection.sendRequest("thread/queue/list", params),
+            add: params => this.connection.sendRequest("thread/queue/add", params),
+            update: params => this.connection.sendRequest("thread/queue/update", params),
+            delete: params => this.connection.sendRequest("thread/queue/delete", params),
+            reorder: params => this.connection.sendRequest("thread/queue/reorder", params),
+            start: params => this.connection.sendRequest("thread/queue/start", params),
+        };
     }
 
     async threadUnsubscribe(params: ThreadUnsubscribeParams): Promise<ThreadUnsubscribeResponse> {
