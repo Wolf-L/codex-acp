@@ -1,7 +1,8 @@
 import * as acp from "@agentclientprotocol/sdk";
 import {RequestError, type SessionId, type SessionModeState} from "@agentclientprotocol/sdk";
 import {CodexEventHandler, type CompletedPlan} from "./CodexEventHandler";
-import {attachmentFileUri, desktopAttachmentHistory} from "./DesktopAttachmentHistory";
+import {attachmentFileUri} from "./DesktopAttachmentHistory";
+import {userInputToContentBlocks} from "./UserInputContent";
 import {CodexApprovalHandler} from "./permissions/CodexApprovalHandler";
 import {PermissionLifecycleContext} from "./permissions/lifecycle";
 import {CodexElicitationHandler} from "./CodexElicitationHandler";
@@ -96,6 +97,8 @@ import {
     type LegacySetSessionModelRequest,
     type LegacySetSessionModelResponse,
     SESSION_STEERING_METHOD,
+    SESSION_REWIND_METHOD,
+    type SessionRewindRequest,
     type SessionSteeringResponse,
     type SessionSteerRequest,
 } from "./AcpExtensions";
@@ -159,6 +162,7 @@ import {
     AIR_CUSTOM_INSTRUCTIONS_KEY,
     AIR_ASYNC_TASKS_KEY,
     AIR_CODEX_HOOKS_KEY,
+    AIR_SESSION_REWIND_KEY,
     AIR_DIFF_PATCH_KEY,
     AIR_NATIVE_SUBAGENT_SESSIONS_KEY,
     AIR_PLAN_CONTENT_DELTA_KEY,
@@ -375,6 +379,9 @@ export class CodexAcpServer {
     private readonly recovery: AppServerRecovery<SessionState> | null;
     private initializeRequest: acp.InitializeRequest | null = null;
     private providerUpdate: Promise<void> | null = null;
+    private readonly rewinds = new Map<string, Promise<void>>();
+    private readonly rewindRecoveryRequired = new Set<string>();
+    private readonly sessionOperations = new Map<string, number>();
     /** The AIR `sessionIndex` extension, see `SessionIndexService.ts`. */
     readonly sessionIndex = new SessionIndexService({
         connection: () => this.connection,
@@ -531,6 +538,7 @@ export class CodexAcpServer {
                                 AIR_RAW_INPUT_RENDERING_KEY,
                                 AIR_PLAN_CONTENT_DELTA_KEY,
                                 AIR_CODEX_HOOKS_KEY,
+                                AIR_SESSION_REWIND_KEY,
                                 ...this.sessionIndex.agentCapabilities(),
                             ],
                         },
@@ -538,6 +546,73 @@ export class CodexAcpServer {
                 } : {}),
             },
         };
+    }
+
+    private assertNotRewinding(sessionId: string): void {
+        if (this.rewinds.has(sessionId)) throw RequestError.invalidRequest(`Session ${sessionId} is rewinding`);
+    }
+
+    private async sessionOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+        while (this.providerUpdate !== null) await this.waitForProviderUpdate();
+        this.assertNotRewinding(sessionId);
+        this.sessionOperations.set(sessionId, (this.sessionOperations.get(sessionId) ?? 0) + 1);
+        try { return await operation(); }
+        finally {
+            const remaining = (this.sessionOperations.get(sessionId) ?? 1) - 1;
+            if (remaining === 0) this.sessionOperations.delete(sessionId);
+            else this.sessionOperations.set(sessionId, remaining);
+        }
+    }
+
+    private async rewindSession(params: SessionRewindRequest): Promise<{rewound: boolean}> {
+        // A later provider restart waits for this operation; an earlier restart completes first.
+        while (this.providerUpdate !== null) await this.waitForProviderUpdate();
+        this.assertNotRewinding(params.sessionId);
+        const state = this.sessions.get(params.sessionId);
+        if (!state) throw RequestError.invalidParams(undefined, `Unknown session: ${params.sessionId}`);
+        if (this.rewindRecoveryRequired.has(params.sessionId)) {
+            throw RequestError.invalidRequest("Previous rewind outcome is uncertain; load the session before continuing");
+        }
+        if (this.sessionIsClosing(params.sessionId) || this.sessionOperations.has(params.sessionId)) {
+            throw RequestError.invalidRequest("Session lifecycle or settings update is in progress");
+        }
+        const prompt = this.activePrompts.get(params.sessionId);
+        // A turn/start that has not answered could write after the rewind. Do not synthesize
+        // completion or reuse closeSession's early-return path for this history mutation.
+        if (prompt && !prompt.currentTurn) throw RequestError.invalidRequest("Prompt startup is pending; cancel or retry after the turn starts");
+        let release!: () => void;
+        this.rewinds.set(params.sessionId, new Promise<void>(resolve => { release = resolve; }));
+        let mutationStarted = false;
+        try {
+            const sessionReady = this.ensureSessionReady(state);
+            if (sessionReady) await sessionReady;
+            const result = await this.runWithProcessCheck(() => this.codexAcpClient.rewindSession(params, {
+                beforeMutation: async () => {
+                    if (!prompt) return;
+                    prompt.requestCancel();
+                    if (prompt.currentTurn) await this.requestTurnInterrupt(prompt.currentTurn, "Cancel");
+                    if (await settledWithin(prompt.completion, 10_000) === "pending") {
+                        throw RequestError.invalidRequest("Prompt has not settled; rewind was not dispatched");
+                    }
+                    await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
+                },
+                mutationStarted: () => { mutationStarted = true; },
+            }));
+            // An old asynchronous title/goal publication must not describe the discarded suffix.
+            this.bumpSessionGeneration(params.sessionId);
+            state.lastTokenUsage = null;
+            state.totalTokenUsage = null;
+            delete state.sessionFailure;
+            return result;
+        } catch (error) {
+            // The storage cutover can succeed before native reload/response delivery fails.
+            // Never repeat the mutation or send against an unverified continuation.
+            if (mutationStarted) this.rewindRecoveryRequired.add(params.sessionId);
+            throw error;
+        } finally {
+            this.rewinds.delete(params.sessionId);
+            release();
+        }
     }
 
     async listHooks(cwd: string): Promise<HooksListEntry> {
@@ -555,6 +630,13 @@ export class CodexAcpServer {
     }
 
     async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+        if ((method === GOAL_CONTROL_METHOD || method === LEGACY_GOAL_CONTROL_METHOD) && typeof params["sessionId"] === "string") {
+            return this.sessionOperation(params["sessionId"], () => this.extMethodDuringOperation(method, params));
+        }
+        return this.extMethodDuringOperation(method, params);
+    }
+
+    private async extMethodDuringOperation(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
         const methodRequest = { method: method, params: params };
         if (!isExtMethodRequest(methodRequest)) {
             return {};
@@ -584,6 +666,8 @@ export class CodexAcpServer {
                     ),
                 };
             }
+            case SESSION_REWIND_METHOD:
+                return await this.rewindSession(methodRequest.params);
             case GOAL_CONTROL_METHOD:
             case LEGACY_GOAL_CONTROL_METHOD: {
                 const sessionState = this.sessions.get(methodRequest.params.sessionId);
@@ -1142,6 +1226,14 @@ export class CodexAcpServer {
     }
 
     async loadSession(params: acp.LoadSessionRequest): Promise<LegacyLoadSessionResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.loadSessionDuringOperation(params);
+            this.rewindRecoveryRequired.delete(params.sessionId);
+            return result;
+        });
+    }
+
+    private async loadSessionDuringOperation(params: acp.LoadSessionRequest): Promise<LegacyLoadSessionResponse> {
         return this.recovery === null
             ? await this.loadSessionOnce(params)
             : await this.recovery.trackOpen(params.sessionId, () => this.loadSessionOnce(params));
@@ -1198,6 +1290,13 @@ export class CodexAcpServer {
     }
 
     async resumeSession(params: acp.ResumeSessionRequest): Promise<LegacyResumeSessionResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.resumeSessionDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async resumeSessionDuringOperation(params: acp.ResumeSessionRequest): Promise<LegacyResumeSessionResponse> {
         return this.recovery === null
             ? await this.resumeSessionOnce(params)
             : await this.recovery.trackOpen(params.sessionId, () => this.resumeSessionOnce(params));
@@ -1225,6 +1324,13 @@ export class CodexAcpServer {
     }
 
     async forkSession(params: acp.ForkSessionRequest): Promise<acp.ForkSessionResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.forkSessionDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async forkSessionDuringOperation(params: acp.ForkSessionRequest): Promise<acp.ForkSessionResponse> {
         if (this.providerUpdate !== null) {
             await this.waitForProviderUpdate();
         }
@@ -1271,6 +1377,13 @@ export class CodexAcpServer {
     }
 
     async closeSession(params: acp.CloseSessionRequest): Promise<acp.CloseSessionResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.closeSessionDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async closeSessionDuringOperation(params: acp.CloseSessionRequest): Promise<acp.CloseSessionResponse> {
         logger.log("Closing session...", {sessionId: params.sessionId});
         const closeGeneration = this.bumpSessionGeneration(params.sessionId);
         const sessionState = this.sessions.get(params.sessionId);
@@ -1313,7 +1426,22 @@ export class CodexAcpServer {
         return {};
     }
 
+    async renameSession(params: {sessionId: string; title: string}): Promise<Record<string, never>> {
+        return this.sessionOperation(params.sessionId, () => this.sessionIndex.rename(params));
+    }
+
+    async setSessionArchived(params: {sessionId: string}, archived: boolean): Promise<Record<string, never>> {
+        return this.sessionOperation(params.sessionId, () => this.sessionIndex.setArchived(params, archived));
+    }
+
     async deleteSession(params: acp.DeleteSessionRequest): Promise<acp.DeleteSessionResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.deleteSessionDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async deleteSessionDuringOperation(params: acp.DeleteSessionRequest): Promise<acp.DeleteSessionResponse> {
         const appServer = this.ensureAppServer();
         if (appServer) await appServer;
         logger.log("Deleting session...", {sessionId: params.sessionId});
@@ -1383,6 +1511,7 @@ export class CodexAcpServer {
         _params: acp.AuthenticateRequest,
         requestId?: acp.JsonRpcId,
     ): Promise<acp.AuthenticateResponse> {
+        if (this.rewinds.size > 0) throw RequestError.invalidRequest("Session rewind is in progress");
         logger.log("Authenticate request received");
         const appServer = this.ensureAppServer();
         if (appServer) await appServer;
@@ -1423,6 +1552,7 @@ export class CodexAcpServer {
     }
 
     async logout(_params: acp.LogoutRequest): Promise<void> {
+        if (this.rewinds.size > 0) throw RequestError.invalidRequest("Session rewind is in progress");
         logger.log("Logout request received");
         const appServer = this.ensureAppServer();
         if (appServer) await appServer;
@@ -1436,12 +1566,16 @@ export class CodexAcpServer {
     }
 
     async setProvider(params: acp.SetProviderRequest): Promise<acp.SetProviderResponse> {
+        while (this.rewinds.size > 0) await Promise.all([...this.rewinds.values()]);
+        if (this.sessionOperations.size > 0) throw RequestError.invalidRequest("A session lifecycle or settings operation is in progress");
         this.codexAcpClient.setProvider(params);
         await this.enqueueProviderUpdate((client) => client.setProvider(params));
         return { };
     }
 
     async disableProvider(params: acp.DisableProviderRequest): Promise<acp.DisableProviderResponse> {
+        while (this.rewinds.size > 0) await Promise.all([...this.rewinds.values()]);
+        if (this.sessionOperations.size > 0) throw RequestError.invalidRequest("A session lifecycle or settings operation is in progress");
         this.codexAcpClient.disableProvider(params);
         if (params.providerId !== OPENAI_PROVIDER_ID) {
             return { };
@@ -1844,6 +1978,8 @@ export class CodexAcpServer {
     async setSessionMode(
         _params: acp.SetSessionModeRequest,
     ): Promise<acp.SetSessionModeResponse> {
+        while (this.providerUpdate !== null) await this.providerUpdate;
+        this.assertNotRewinding(_params.sessionId);
         logger.log("Set session mode requested", {
             sessionId: _params.sessionId,
             modeId: _params.modeId
@@ -1856,6 +1992,13 @@ export class CodexAcpServer {
     }
 
     async setSessionConfigOption(params: acp.SetSessionConfigOptionRequest): Promise<acp.SetSessionConfigOptionResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.setSessionConfigOptionDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async setSessionConfigOptionDuringOperation(params: acp.SetSessionConfigOptionRequest): Promise<acp.SetSessionConfigOptionResponse> {
         logger.log("Set session config option requested", {
             sessionId: params.sessionId,
             configId: params.configId,
@@ -1965,6 +2108,13 @@ export class CodexAcpServer {
     }
 
     async unstable_setSessionModel(params: LegacySetSessionModelRequest): Promise<LegacySetSessionModelResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.unstable_setSessionModelDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async unstable_setSessionModelDuringOperation(params: LegacySetSessionModelRequest): Promise<LegacySetSessionModelResponse> {
         logger.log("Set session model requested", {
             sessionId: params.sessionId,
             modelId: params.modelId
@@ -2027,6 +2177,14 @@ export class CodexAcpServer {
      *     {@link performSteeringRequest}.
      */
     async executeOrQueueSteeringRequest(params: SessionSteerRequest): Promise<SessionSteeringResponse> {
+        return this.sessionOperation(params.sessionId, async () => {
+            const result = await this.executeOrQueueSteeringRequestDuringOperation(params);
+            return result;
+        });
+    }
+
+    private async executeOrQueueSteeringRequestDuringOperation(params: SessionSteerRequest): Promise<SessionSteeringResponse> {
+        if (this.rewindRecoveryRequired.has(params.sessionId)) throw RequestError.invalidRequest("Previous rewind outcome is uncertain; load the session before continuing");
         const queue = this.getSteeringQueue(params.sessionId);
         try {
             return await queue.enqueue(params);
@@ -2866,7 +3024,7 @@ export class CodexAcpServer {
     private createUserMessageUpdates(item: ThreadItem & { type: "userMessage" }): UpdateSessionEvent[] {
         const updates: UpdateSessionEvent[] = [];
         const messageId = item.id;
-        const contentBlocks = item.content.map(input => this.userInputToContentBlocks(input));
+        const contentBlocks = item.content.map(input => userInputToContentBlocks(input));
         const attachmentUris = new Set(contentBlocks.flatMap((blocks, index) =>
             item.content[index]?.type === "text"
                 ? blocks.flatMap(block => block.type === "resource_link" ? [block.uri] : [])
@@ -2921,47 +3079,6 @@ export class CodexAcpServer {
             item.id,
             createMessagePhaseMeta("final_answer", this.capabilities.airClient),
         );
-    }
-
-    private userInputToContentBlocks(input: UserInput): acp.ContentBlock[] {
-        switch (input.type) {
-            case "text":
-                return desktopAttachmentHistory(input.text)
-                    ?? (input.text.length > 0 ? [{ type: "text", text: input.text }] : []);
-            case "image":
-                return [{
-                    type: "text",
-                    text: "url" in input
-                        ? this.formatUriAsLink("image", input.url)
-                        : `image:${input.fileId}`,
-                }];
-            case "localImage":
-            case "localAudio":
-            case "mention": {
-                const uri = attachmentFileUri(input.path);
-                const fileName = input.path.split(/[\\/]/).pop() || input.type;
-                const name = input.type === "mention" && input.name.trim().length > 0 ? input.name : fileName;
-                return uri !== null
-                    ? [{type: "resource_link", name, uri}]
-                    : [{type: "text", text: this.formatUriAsLink(name, input.path)}];
-            }
-            case "skill":
-                return [{ type: "text", text: `skill:${input.name} (${input.path})` }];
-            case "audio":
-                return [{type: "text", text: this.formatUriAsLink("audio", input.url)}];
-        }
-    }
-
-    private formatUriAsLink(name: string | null, uri: string): string {
-        if (name && name.length > 0) {
-            return `[@${name}](${uri})`;
-        }
-        if (uri.startsWith("file://")) {
-            const path = uri.replace("file://", "");
-            const fileName = path.split("/").pop() ?? path;
-            return `[@${fileName}](${uri})`;
-        }
-        return uri;
     }
 
     getSessionState(sessionId: string): SessionState {
@@ -3256,6 +3373,12 @@ export class CodexAcpServer {
         if (this.providerUpdate !== null) {
             await this.waitForProviderUpdate();
         }
+        this.assertNotRewinding(params.sessionId);
+        if (this.rewindRecoveryRequired.has(params.sessionId)) {
+            throw RequestError.invalidRequest("Previous rewind outcome is uncertain; load the session before continuing");
+        }
+        if (this.sessionIsClosing(params.sessionId)) throw RequestError.invalidRequest("Session is closing");
+        if (this.activePrompts.has(params.sessionId)) throw RequestError.invalidRequest("Prompt is already running");
         logger.log("Prompt received", {
             sessionId: params.sessionId,
             prompt: params.prompt,
