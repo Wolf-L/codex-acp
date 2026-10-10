@@ -67,3 +67,11 @@ History rewind does not restore files. See [native session extensions](native-se
 The interface and original implementation come from [Nikita Ashikhmin's PR #508](https://github.com/agentclientprotocol/codex-acp/pull/508). This refresh is based on upstream main `202e66e` (2.2.2) and adds validation/lifecycle safeguards; it is not a new incompatible rewind protocol. The historical commits were consolidated during refresh, not retained as a four-commit chain.
 
 Rewind invalidates pending automatic titles and waits for already dispatched title writes, including work retained from older load/resume/close states. A pending or unacknowledged native title write prevents history mutation. The ordinary bounded load/title wait remains unchanged. Current upstream app-server recovery, custom instructions and sessionIndex behavior are preserved; new index mutations share the rewind admission fence.
+
+## Native regression tests
+
+Run `npm run test:native -- --rewind-only` with Node 24+, Python 3 and the locked platform-specific optional Codex package. The harness rebuilds the adapter and runs real native stdio against an isolated loopback model, with fresh homes and workspaces rather than user credentials or sessions. It checks message identities, invalid targets, first/latest/historical rewind, cold reload, resend context and cancellation.
+
+Build/source/native hashes, RPC and model traces, shutdown evidence and the final report are retained under `tmp/native-e2e/run-*`. Add `--output <directory>` to select another artifact parent. `npm run test:native -- --rewind-only --wrong-reply` deliberately injects an incorrect model response and is expected to exit nonzero; it is a failure-path check, not a normal passing suite.
+
+Use `npm run test:native:all` for the integrated session-extension and persistent-queue suites. See [native session extensions](native-session-extensions.md#validation) for the complete validation commands and coverage limits.

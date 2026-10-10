@@ -179,7 +179,7 @@ compaction lifecycle instead of the legacy completion advisory.
 
 ### Isolated native rewind tests
 
-Run `npm run test:native:rewind` with Node 24+, Python 3, and the platform
+Run `npm run test:native -- --rewind-only` with Node 24+, Python 3, and the platform
 optional Codex package installed. `NATIVE_E2E_PYTHON` overrides the Python
 executable (default: `python` on Windows, `python3` elsewhere). The harness
 uses an isolated child environment and local provider; it does not reuse your
