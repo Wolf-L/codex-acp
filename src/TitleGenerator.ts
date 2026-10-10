@@ -36,6 +36,10 @@ const runTitleWriteNow: SerializeTitleWrite = (_title, write) => write();
 
 export class TitleGenerator {
     private generated = false;
+    private existingTitle = false;
+    private generation = 0;
+    /** Kept even on failure: a lost acknowledgement does not prove the native write was cancelled. */
+    private dispatchedWrite: Promise<unknown> | null = null;
     /** The generated title was dropped for an explicit title, see {@link retryAfterFailedRename}. */
     private droppedForExplicitTitle = false;
     private inFlight: Promise<void> | null = null;
@@ -54,8 +58,30 @@ export class TitleGenerator {
      * Prevents any future generation since a human-set or prior AI title exists.
      */
     markExistingTitle(): void {
+        this.existingTitle = true;
+        this.generation++;
         this.generated = true;
         this.droppedForExplicitTitle = false;
+    }
+
+    /**
+     * Call in rewind's beforeMutation hook, after the active prompt has settled, while new prompts are
+     * excluded. Invalidates pending generation and queued callbacks without waiting for the title model.
+     * A dispatched rename must acknowledge before history can change; failure rejects this hook (and
+     * later attempts), even though ordinary title generation is best-effort. Do not swallow that error.
+     * Existing names are kept; work discarded before dispatch may retry on a later completed turn.
+     */
+    async invalidateForRewind(): Promise<void> {
+        this.generation++;
+        this.generated = this.existingTitle || this.dispatchedWrite !== null;
+        this.droppedForExplicitTitle = false;
+        this.inFlight = null;
+        this.observeRename();
+        try {
+            await this.dispatchedWrite;
+        } catch (cause) {
+            throw new Error("Automatic title write was not acknowledged; rewind was not dispatched", {cause});
+        }
     }
 
     /**
@@ -93,7 +119,7 @@ export class TitleGenerator {
         // "unknown": resumed session with indeterminate history — skip
         if (src === "explicit" || src === "unknown") return;
         this.generated = true;
-        const run = this.generateAndPersist(userPromptText)
+        const run = this.generateAndPersist(userPromptText, this.generation)
             .catch(() => {
                 // title generation is best-effort; never surface errors to the user
             })
@@ -128,7 +154,7 @@ export class TitleGenerator {
         }
     }
 
-    private async generateAndPersist(userPromptText: string): Promise<void> {
+    private async generateAndPersist(userPromptText: string, generation: number): Promise<void> {
         if (!userPromptText.trim()) return;
 
         // Ephemeral thread: not persisted to disk, not visible in thread list,
@@ -137,6 +163,7 @@ export class TitleGenerator {
             cwd: this.cwd,
             ephemeral: true,
         });
+        if (generation !== this.generation) return;
 
         const turnResult = await this.client.runTurn({
             threadId: epThread.id,
@@ -148,6 +175,7 @@ export class TitleGenerator {
             outputSchema: TITLE_OUTPUT_SCHEMA,
             model: TITLE_MODEL,
         });
+        if (generation !== this.generation) return;
 
         const title = extractTitle(turnResult.turn);
         if (!title) return;
@@ -160,14 +188,19 @@ export class TitleGenerator {
         }
 
         const written = await this.serializeTitleWrite(title, async () => {
+            // Invalidation can happen while this callback waits in the session-index write queue.
+            if (generation !== this.generation) return false;
             // An explicit rename that came while this write waited for its turn wins.
             if (this.getSessionTitleSource() === "explicit") return false;
-            await this.client.threadSetName({
+            this.dispatchedWrite = this.client.threadSetName({
                 threadId: this.mainThreadId,
                 name: title,
             });
+            await this.dispatchedWrite;
             return true;
         });
+        // An obsolete callback must not change retry/echo state belonging to a later generation.
+        if (generation !== this.generation) return;
         if (!written) {
             this.droppedForExplicitTitle = true;
             return;
