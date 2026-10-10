@@ -57,6 +57,8 @@ export interface SessionIndexHost {
     closeSession(sessionId: string): Promise<void>;
     beginSessionCloseFence(sessionId: string): void;
     endSessionCloseFence(sessionId: string): void;
+    /** Reserves the session against native queue writes and cancellation in flight. */
+    runSessionMutation?<T>(sessionId: string, operation: () => Promise<T>): Promise<T>;
 }
 
 type SessionPage = {sessions: acp.SessionInfo[], nextCursor: string | null};
@@ -189,9 +191,12 @@ export class SessionIndexService {
     /** `_session/rename`. */
     async rename({sessionId, title}: SessionRenameRequest): Promise<Record<string, never>> {
         this.require(SESSION_RENAME_METHOD);
-        await this.host.ensureAppServer();
-        await this.titles.rename(sessionId, title);
-        return {};
+        const rename = async () => {
+            await this.host.ensureAppServer();
+            await this.titles.rename(sessionId, title);
+            return {};
+        };
+        return this.host.runSessionMutation ? this.host.runSessionMutation(sessionId, rename) : rename();
     }
 
     /**
@@ -202,6 +207,11 @@ export class SessionIndexService {
      */
     async setArchived({sessionId}: SessionArchiveRequest, archived: boolean): Promise<Record<string, never>> {
         this.require(archived ? SESSION_ARCHIVE_METHOD : SESSION_UNARCHIVE_METHOD);
+        const mutate = () => this.setArchivedDuringOperation(sessionId, archived);
+        return this.host.runSessionMutation ? this.host.runSessionMutation(sessionId, mutate) : mutate();
+    }
+
+    private async setArchivedDuringOperation(sessionId: string, archived: boolean): Promise<Record<string, never>> {
         logger.log(archived ? "Archiving session..." : "Unarchiving session...", {sessionId});
         await this.host.ensureAppServer();
         // Read before the fence, which counts as open.
