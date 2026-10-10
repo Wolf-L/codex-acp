@@ -680,11 +680,14 @@ export class CodexAcpServer {
             || this.pendingTurnStarts.size || this.closingSessions.size) throw RequestError.invalidRequest("Provider is busy; settle work before reverting files");
         this.providerRuntimeControl = true;
         try {
-            const sessionReady = this.ensureSessionReady(state);
-            if (sessionReady) await sessionReady;
             // Include native-loaded child threads, not just root ACP sessions. Fail closed if
             // this native version cannot prove that its background terminals are idle.
             await this.boundedRuntimeControl(async () => {
+            // Recovery can itself wait on queue/list or thread/resume. Bound that wait while
+            // holding the provider reservation, and reject late completion after invalidation.
+            const sessionReady = this.ensureSessionReady(state);
+            if (sessionReady) await sessionReady;
+            this.assertProviderAvailable();
             let cursor: string | null = null;
             const seen = new Set<string>();
             do {

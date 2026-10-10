@@ -181,6 +181,27 @@ describe("native pending queue admission", () => {
 
 
 describe("provider control recovery", () => {
+    it("bounds file-revert recovery and prevents late readiness from reaching file preflight", async () => {
+        vi.useFakeTimers();
+        try {
+            const {agent,native}=setup();
+            const ready=deferred<void>();
+            vi.spyOn(agent as unknown as {ensureSessionReady:()=>Promise<void>},"ensureSessionReady").mockReturnValue(ready.promise);
+            const loaded=vi.spyOn(native,"threadLoadedList");
+            const history=vi.spyOn(native,"threadReadWithHistory");
+            const pending=agent.revertFiles({sessionId,toolCallId:"file",dryRun:true});
+            const failure=expect(pending).rejects.toThrow("timed out");
+            await vi.advanceTimersByTimeAsync(30_000);
+            await failure;
+            await expect(agent.closeSession({sessionId})).resolves.toEqual({});
+            await expect(agent.newSession({cwd:"/test/cwd",mcpServers:[]})).rejects.toMatchObject({data:expect.stringContaining("invalidated")});
+            ready.resolve();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(loaded).not.toHaveBeenCalled();
+            expect(history).not.toHaveBeenCalled();
+        } finally {vi.useRealTimers();}
+    });
+
     it("invalidates sessions after a hung control, keeps close reachable and rejects late installation", async () => {
         vi.useFakeTimers();
         try {
