@@ -8,9 +8,9 @@ const mocks = vi.hoisted(() => ({spawn: vi.fn(), spawnSync: vi.fn(), dispose: vi
 vi.mock("node:child_process", () => ({spawn: mocks.spawn, spawnSync: mocks.spawnSync}));
 vi.mock("cross-spawn", () => ({default: mocks.spawn}));
 vi.mock("vscode-jsonrpc/node", () => ({
-    createMessageConnection: () => ({listen() {}, dispose: mocks.dispose}),
+    createMessageConnection: () => ({listen() {}, onNotification() {}, dispose: mocks.dispose}),
 }));
-vi.mock("../StdUtils", () => ({createJSONRPCReader() {}, createJSONRPCWriter() {}}));
+vi.mock("../StdUtils", () => ({createJSONRPCReader() { return {}; }, createJSONRPCWriter() {}}));
 vi.mock("../Logger", () => ({logger: {log: vi.fn()}}));
 
 function child(pid: number | undefined = 987654) {
